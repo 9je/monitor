@@ -93,43 +93,34 @@ pub fn set_primary(name: &str) -> Result<(), String> {
     }
 }
 
-/// Spawn a fullscreen identify overlay on each of the given monitors.
-/// Returns the child processes so the caller can kill them early if needed.
-pub fn spawn_identify_overlays(
-    monitors: &[Monitor],
-) -> Vec<std::process::Child> {
+/// Spawn a small corner overlay on every connected monitor simultaneously.
+/// Returns child processes so the caller can kill them early if needed.
+pub fn spawn_identify_overlays(monitors: &[Monitor]) -> Vec<std::process::Child> {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return Vec::new(),
     };
-
     monitors
         .iter()
         .enumerate()
-        .filter_map(|(i, m)| {
-            let (x, y) = m.position;
-            let (w, h) = m.logical_resolution();
-            std::process::Command::new(&exe)
-                .args([
-                    "--identify",
-                    &i.to_string(),
-                    &m.name,
-                    &x.to_string(),
-                    &y.to_string(),
-                    &w.to_string(),
-                    &h.to_string(),
-                ])
-                .spawn()
-                .ok()
-        })
+        .filter_map(|(i, m)| spawn_identify_child(&exe, i, m))
         .collect()
 }
 
-/// Spawn a single identify overlay for one monitor.
+/// Spawn a single corner overlay for one monitor.
 pub fn spawn_identify_one(index: usize, monitor: &Monitor) -> Option<std::process::Child> {
     let exe = std::env::current_exe().ok()?;
+    spawn_identify_child(&exe, index, monitor)
+}
+
+fn spawn_identify_child(
+    exe: &std::path::Path,
+    index: usize,
+    monitor: &Monitor,
+) -> Option<std::process::Child> {
     let (x, y) = monitor.position;
-    let (w, h) = monitor.logical_resolution();
+    // Pass raw X11 physical pixel coordinates. The identify subprocess
+    // converts to egui logical points via pixels_per_point at runtime.
     std::process::Command::new(exe)
         .args([
             "--identify",
@@ -137,8 +128,6 @@ pub fn spawn_identify_one(index: usize, monitor: &Monitor) -> Option<std::proces
             &monitor.name,
             &x.to_string(),
             &y.to_string(),
-            &w.to_string(),
-            &h.to_string(),
         ])
         .spawn()
         .ok()

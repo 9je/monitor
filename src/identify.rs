@@ -1,33 +1,35 @@
 //! Identify overlay — spawned as a subprocess per monitor.
 //!
-//! Usage: monitor --identify INDEX NAME X Y W H
-//!   INDEX  — 0-based monitor number shown as the big label
-//!   NAME   — e.g. "DisplayPort-1"
-//!   X Y    — top-left corner in global X11 coordinates
-//!   W H    — monitor resolution in pixels
+//! Usage: monitor --identify INDEX NAME PHYS_X PHYS_Y
+//!
+//! PHYS_X/PHYS_Y are the monitor's top-left corner in raw X11 physical pixels
+//! (as reported by xrandr). We convert to egui logical points at runtime using
+//! ctx.pixels_per_point(), which is what ViewportCommand::OuterPosition expects.
 
-use eframe::egui::{self, Color32, FontId, RichText};
+use eframe::egui::{self, Color32, FontId, RichText, Rounding};
 use std::time::{Duration, Instant};
 
+// Fixed logical size in egui points — small corner box.
+const BOX_W: f32 = 210.0;
+const BOX_H: f32 = 160.0;
 const DISPLAY_SECS: u64 = 4;
 
 pub fn run(args: &[String]) -> eframe::Result {
-    // args: ["monitor", "--identify", INDEX, NAME, X, Y, W, H]
+    // args: ["monitor", "--identify", INDEX, NAME, PHYS_X, PHYS_Y]
     let index: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     let name = args.get(3).cloned().unwrap_or_default();
-    let x: f32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let y: f32 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let w: f32 = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(800.0);
-    let h: f32 = args.get(7).and_then(|s| s.parse().ok()).unwrap_or(600.0);
+    let phys_x: f32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let phys_y: f32 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
-    // Window title encodes index so xdotool can find it if needed
     let title = format!("monitor-identify-{index}");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(&title)
-            .with_position([x, y])
-            .with_inner_size([w, h])
+            // Don't set position here — ViewportBuilder also multiplies by ppp
+            // before passing to winit, and we don't know ppp at build time.
+            // We force position via ViewportCommand in the first frame instead.
+            .with_inner_size([BOX_W, BOX_H])
             .with_decorations(false)
             .with_resizable(false),
         ..Default::default()
@@ -40,12 +42,10 @@ pub fn run(args: &[String]) -> eframe::Result {
             Ok(Box::new(IdentifyApp {
                 index,
                 name,
-                target_x: x,
-                target_y: y,
-                target_w: w,
-                target_h: h,
+                phys_x,
+                phys_y,
                 deadline: Instant::now() + Duration::from_secs(DISPLAY_SECS),
-                frames: 0,
+                positioned: false,
             }))
         }),
     )
@@ -54,31 +54,30 @@ pub fn run(args: &[String]) -> eframe::Result {
 struct IdentifyApp {
     index: usize,
     name: String,
-    target_x: f32,
-    target_y: f32,
-    target_w: f32,
-    target_h: f32,
+    /// Target position in raw X11 physical pixels (from xrandr).
+    phys_x: f32,
+    phys_y: f32,
     deadline: Instant,
-    frames: u32,
+    positioned: bool,
 }
 
 impl eframe::App for IdentifyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Force position for the first several frames to override WM placement.
-        // ViewportCommand::OuterPosition sends XMoveWindow directly to the X server.
-        if self.frames < 5 {
+        // Force position every frame until the window settles.
+        // ViewportCommand::OuterPosition takes egui *points* — divide physical
+        // pixels by pixels_per_point to get the correct logical position.
+        if !self.positioned {
+            let ppp = ctx.pixels_per_point();
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                self.target_x,
-                self.target_y,
+                self.phys_x / ppp,
+                self.phys_y / ppp,
             )));
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                self.target_w,
-                self.target_h,
-            )));
-            self.frames += 1;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(BOX_W, BOX_H)));
+            self.positioned = true;
+            ctx.request_repaint(); // ensure next frame fires immediately
         }
 
-        // Close when time is up
+        // Auto-close
         let remaining = self.deadline.checked_duration_since(Instant::now());
         if remaining.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -87,50 +86,48 @@ impl eframe::App for IdentifyApp {
         let secs_left = remaining.unwrap().as_secs() + 1;
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_rgba_unmultiplied(10, 15, 30, 230)))
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(12, 16, 30))
+                    .stroke(egui::Stroke::new(3.0, Color32::from_rgb(80, 140, 255)))
+                    .rounding(Rounding::same(8.0)),
+            )
             .show(ctx, |ui: &mut egui::Ui| {
-                let h = ui.available_height();
-
-                // Big number — takes up the top ~60% of the window
-                ui.add_space(h * 0.12);
+                ui.add_space(14.0);
                 ui.vertical_centered(|ui| {
+                    // Big number
                     ui.label(
                         RichText::new(self.index.to_string())
-                            .font(FontId::proportional(h * 0.45))
+                            .font(FontId::proportional(72.0))
                             .color(Color32::WHITE)
                             .strong(),
                     );
-                });
 
-                // Divider
-                ui.add_space(8.0);
-                ui.add(egui::Separator::default().horizontal().shrink(60.0));
-                ui.add_space(12.0);
+                    ui.add_space(4.0);
 
-                // Monitor name
-                ui.vertical_centered(|ui| {
+                    // Port name
                     ui.label(
                         RichText::new(&self.name)
-                            .font(FontId::proportional(h * 0.065))
-                            .color(Color32::from_rgb(140, 185, 255)),
+                            .font(FontId::proportional(14.0))
+                            .color(Color32::from_rgb(130, 175, 255)),
                     );
 
                     ui.add_space(6.0);
 
                     // Countdown
                     ui.label(
-                        RichText::new(format!("Closing in {secs_left}s — press Esc to dismiss"))
-                            .font(FontId::proportional(h * 0.033))
-                            .color(Color32::from_rgb(100, 110, 140)),
+                        RichText::new(format!("{}s  ·  Esc to close", secs_left))
+                            .font(FontId::proportional(11.0))
+                            .color(Color32::from_rgb(80, 90, 120)),
                     );
                 });
             });
 
-        // Close on Escape
+        // Dismiss on Escape
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
-        ctx.request_repaint_after(Duration::from_millis(200));
+        ctx.request_repaint_after(Duration::from_millis(500));
     }
 }

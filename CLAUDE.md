@@ -43,6 +43,16 @@ cargo test            # unit tests (no display needed)
 cargo build --release # optimized binary
 ```
 
+## After every code change — always do all three
+
+```bash
+bash install.sh       # rebuilds release binary + updates ~/.local/bin/monitor
+git add -A && git commit -m "..." && git push
+DISPLAY=:1 /home/admin/.local/bin/monitor &   # relaunch to verify
+```
+
+Never leave a session where code was changed but install.sh wasn't run and GitHub wasn't updated.
+
 ## Install to app launcher (local, no Flatpak)
 
 ```bash
