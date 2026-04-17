@@ -1,18 +1,15 @@
 use crate::display::{self, Monitor, Rotation};
-use eframe::egui::{
-    self, Color32, FontId, Margin, RichText, Rounding, Stroke, ViewportBuilder, ViewportId,
-};
+use eframe::egui::{self, Color32, FontId, Margin, RichText, Rounding, Stroke};
 use std::time::{Duration, Instant};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-const IDENTIFY_DURATION: Duration = Duration::from_secs(4);
+const IDENTIFY_DURATION: Duration = Duration::from_secs(3);
 
 pub struct App {
     monitors: Vec<Monitor>,
     last_refresh: Instant,
-    status: Option<(String, bool)>, // (message, is_error)
-    identify_viewports: Vec<(ViewportId, String)>,
-    identify_until: Option<Instant>,
+    status: Option<(String, bool)>,           // (message, is_error)
+    identifying: Option<(String, Instant)>,   // (monitor name, started_at)
 }
 
 impl App {
@@ -22,8 +19,7 @@ impl App {
             monitors,
             last_refresh: Instant::now(),
             status: None,
-            identify_viewports: Vec::new(),
-            identify_until: None,
+            identifying: None,
         }
     }
 
@@ -33,9 +29,7 @@ impl App {
                 self.monitors = m;
                 self.last_refresh = Instant::now();
             }
-            Err(e) => {
-                self.status = Some((format!("Refresh failed: {e}"), true));
-            }
+            Err(e) => self.status = Some((format!("Refresh failed: {e}"), true)),
         }
     }
 
@@ -45,96 +39,75 @@ impl App {
                 self.status = Some((format!("Set {name} as primary"), false));
                 self.refresh();
             }
-            Err(e) => {
-                self.status = Some((format!("Error: {e}"), true));
-            }
+            Err(e) => self.status = Some((format!("Error: {e}"), true)),
         }
     }
 
-    fn identify_all(&mut self) {
-        self.identify_viewports.clear();
-        for m in &self.monitors {
-            let id = ViewportId::from_hash_of(format!("identify_{}", m.name));
-            self.identify_viewports.push((id, m.name.clone()));
+    /// Dim all monitors except `target_name`. Spawns a thread to restore after IDENTIFY_DURATION.
+    fn identify(&mut self, target_name: &str) {
+        let monitors = self.monitors.clone();
+        let target = target_name.to_string();
+
+        match display::dim_others(&target, &monitors) {
+            Ok(()) => {
+                self.identifying = Some((target.clone(), Instant::now()));
+                self.status = Some((
+                    format!("Identifying {target} — look for the bright screen"),
+                    false,
+                ));
+
+                // Restore in background after delay
+                let restore_monitors = monitors.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(IDENTIFY_DURATION);
+                    let _ = display::restore_brightness(&restore_monitors);
+                });
+            }
+            Err(e) => self.status = Some((format!("Identify error: {e}"), true)),
         }
-        self.identify_until = Some(Instant::now() + IDENTIFY_DURATION);
+    }
+
+    /// Cycle through each monitor (brighten one at a time) so user can see all ports.
+    fn identify_all(&mut self) {
+        let monitors = self.monitors.clone();
+        self.status = Some(("Cycling through all monitors...".into(), false));
+
+        std::thread::spawn(move || {
+            for m in &monitors {
+                let _ = display::dim_others(&m.name, &monitors);
+                std::thread::sleep(Duration::from_millis(1600));
+            }
+            let _ = display::restore_brightness(&monitors);
+        });
+    }
+
+    /// Cancel any active identify and restore brightness immediately.
+    fn cancel_identify(&mut self) {
+        self.identifying = None;
+        let monitors = self.monitors.clone();
+        std::thread::spawn(move || {
+            let _ = display::restore_brightness(&monitors);
+        });
+        self.status = Some(("Restored brightness".into(), false));
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Auto-refresh
+        // Auto-refresh monitor state
         if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
             self.refresh();
         }
 
-        // Expire identify overlays
-        if let Some(until) = self.identify_until {
-            if Instant::now() >= until {
-                self.identify_viewports.clear();
-                self.identify_until = None;
+        // Expire identifying state (the restore already happened in the background thread)
+        if let Some((_, started)) = &self.identifying {
+            if started.elapsed() >= IDENTIFY_DURATION {
+                self.identifying = None;
             } else {
-                ctx.request_repaint_after(Duration::from_millis(200));
+                ctx.request_repaint_after(Duration::from_millis(250));
             }
         }
 
-        // Render identify overlays as secondary viewports
-        let viewports: Vec<(ViewportId, String, Monitor)> = self
-            .identify_viewports
-            .iter()
-            .filter_map(|(id, name)| {
-                self.monitors
-                    .iter()
-                    .find(|m| &m.name == name)
-                    .map(|m| (*id, name.clone(), m.clone()))
-            })
-            .collect();
-
-        for (id, name, monitor) in viewports {
-            let (x, y) = monitor.position;
-            let (w, h) = monitor.logical_resolution();
-            let label = format_identify_label(&monitor);
-            let seconds_left = self
-                .identify_until
-                .and_then(|u| u.checked_duration_since(Instant::now()))
-                .map(|d| d.as_secs() + 1)
-                .unwrap_or(0);
-
-            ctx.show_viewport_deferred(
-                id,
-                ViewportBuilder::default()
-                    .with_title(format!("Identify: {name}"))
-                    .with_position([x as f32, y as f32])
-                    .with_inner_size([w as f32, h as f32])
-                    .with_decorations(false),
-                move |ctx, _class| {
-                    egui::CentralPanel::default()
-                        .frame(
-                            egui::Frame::none()
-                                .fill(Color32::from_rgb(15, 20, 35)),
-                        )
-                        .show(ctx, |ui: &mut egui::Ui| {
-                            ui.add_space(ui.available_height() * 0.25);
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    RichText::new(&label)
-                                        .font(FontId::proportional(72.0))
-                                        .color(Color32::WHITE)
-                                        .strong(),
-                                );
-                                ui.add_space(20.0);
-                                ui.label(
-                                    RichText::new(format!("Closing in {seconds_left}s"))
-                                        .font(FontId::proportional(28.0))
-                                        .color(Color32::from_rgb(150, 150, 180)),
-                                );
-                            });
-                        });
-                },
-            );
-        }
-
-        // Main panel
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
@@ -142,17 +115,23 @@ impl eframe::App for App {
                     .inner_margin(Margin::same(16.0)),
             )
             .show(ctx, |ui| {
-                // Header
+                // ── Header ──
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new("monitour")
+                        RichText::new("Monitor")
                             .font(FontId::proportional(28.0))
                             .color(Color32::from_rgb(130, 190, 255))
                             .strong(),
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Identify All").clicked() {
-                            self.identify_all();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui: &mut egui::Ui| {
+                        if self.identifying.is_some() {
+                            if ui.button("Cancel Identify").clicked() {
+                                self.cancel_identify();
+                            }
+                        } else {
+                            if ui.button("Identify All").clicked() {
+                                self.identify_all();
+                            }
                         }
                         ui.add_space(8.0);
                         if ui.button("Refresh").clicked() {
@@ -165,10 +144,10 @@ impl eframe::App for App {
                 ui.separator();
                 ui.add_space(8.0);
 
-                // Status bar
+                // ── Status bar ──
                 if let Some((msg, is_error)) = &self.status {
                     let color = if *is_error {
-                        Color32::from_rgb(255, 100, 100)
+                        Color32::from_rgb(255, 110, 110)
                     } else {
                         Color32::from_rgb(100, 220, 130)
                     };
@@ -176,7 +155,7 @@ impl eframe::App for App {
                     ui.add_space(4.0);
                 }
 
-                // Monitor cards
+                // ── Monitor cards ──
                 let monitors: Vec<Monitor> = self.monitors.clone();
                 if monitors.is_empty() {
                     ui.centered_and_justified(|ui| {
@@ -188,45 +167,67 @@ impl eframe::App for App {
                     return;
                 }
 
+                let identifying_name: Option<String> = self.identifying.as_ref().map(|(n, _)| n.clone());
+
+                let mut pending_action: Option<(CardAction, String)> = None;
+
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for monitor in &monitors {
-                        render_monitor_card(ui, monitor, |name| self.set_primary(name));
+                        let is_identifying = identifying_name.as_deref() == Some(&monitor.name);
+                        let action = render_monitor_card(ui, monitor, is_identifying);
+                        if action != CardAction::None {
+                            pending_action = Some((action, monitor.name.clone()));
+                        }
                         ui.add_space(10.0);
                     }
                 });
+
+                match pending_action {
+                    Some((CardAction::SetPrimary, name)) => self.set_primary(&name),
+                    Some((CardAction::Identify, name)) => self.identify(&name),
+                    _ => {}
+                }
             });
 
         ctx.request_repaint_after(Duration::from_secs(1));
     }
 }
 
-fn render_monitor_card(
-    ui: &mut egui::Ui,
-    monitor: &Monitor,
-    mut on_set_primary: impl FnMut(&str),
-) {
+#[derive(PartialEq)]
+enum CardAction {
+    None,
+    SetPrimary,
+    Identify,
+}
+
+fn render_monitor_card(ui: &mut egui::Ui, monitor: &Monitor, is_identifying: bool) -> CardAction {
     let is_primary = monitor.is_primary;
-    let border_color = if is_primary {
+    let border_color = if is_identifying {
+        Color32::from_rgb(255, 200, 50)
+    } else if is_primary {
         Color32::from_rgb(100, 160, 255)
     } else {
         Color32::from_rgb(55, 65, 85)
     };
-    let bg_color = if is_primary {
+    let bg_color = if is_identifying {
+        Color32::from_rgb(45, 40, 20)
+    } else if is_primary {
         Color32::from_rgb(28, 38, 60)
     } else {
         Color32::from_rgb(30, 36, 50)
     };
 
+    let mut action = CardAction::None;
+
     egui::Frame::none()
         .fill(bg_color)
         .rounding(Rounding::same(8.0))
-        .stroke(Stroke::new(if is_primary { 2.0 } else { 1.0 }, border_color))
+        .stroke(Stroke::new(if is_primary || is_identifying { 2.0 } else { 1.0 }, border_color))
         .inner_margin(Margin::same(14.0))
         .show(ui, |ui: &mut egui::Ui| {
             ui.horizontal(|ui| {
-                // Left side: info
+                // ── Left: info ──
                 ui.vertical(|ui| {
-                    // Name + PRIMARY badge
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(&monitor.name)
@@ -236,24 +237,16 @@ fn render_monitor_card(
                         );
                         if is_primary {
                             ui.add_space(6.0);
-                            egui::Frame::none()
-                                .fill(Color32::from_rgb(50, 100, 200))
-                                .rounding(Rounding::same(4.0))
-                                .inner_margin(Margin::symmetric(6.0, 2.0))
-                                .show(ui, |ui: &mut egui::Ui| {
-                                    ui.label(
-                                        RichText::new("PRIMARY")
-                                            .font(FontId::proportional(11.0))
-                                            .color(Color32::WHITE)
-                                            .strong(),
-                                    );
-                                });
+                            badge(ui, "PRIMARY", Color32::from_rgb(50, 100, 200));
+                        }
+                        if is_identifying {
+                            ui.add_space(6.0);
+                            badge(ui, "IDENTIFYING", Color32::from_rgb(160, 120, 0));
                         }
                     });
 
                     ui.add_space(6.0);
 
-                    // Resolution + refresh rate
                     let (lw, lh) = monitor.logical_resolution();
                     let res_str = if lw != monitor.resolution.0 || lh != monitor.resolution.1 {
                         format!(
@@ -265,7 +258,6 @@ fn render_monitor_card(
                     };
                     ui.label(RichText::new(res_str).color(Color32::from_rgb(180, 200, 230)));
 
-                    // Physical size
                     if let Some(inches) = monitor.size_inches() {
                         let (w_mm, h_mm) = monitor.physical_mm.unwrap();
                         ui.label(
@@ -275,12 +267,11 @@ fn render_monitor_card(
                         );
                     }
 
-                    // Position + rotation
                     let (px, py) = monitor.position;
                     let pos_str = if matches!(monitor.rotation, Rotation::Normal) {
                         format!("Position: ({px}, {py})")
                     } else {
-                        format!("Position: ({px}, {py})  |  Rotation: {}", monitor.rotation.label())
+                        format!("Position: ({px}, {py})  ·  Rotation: {}", monitor.rotation.label())
                     };
                     ui.label(
                         RichText::new(pos_str)
@@ -289,32 +280,52 @@ fn render_monitor_card(
                     );
                 });
 
-                // Right side: Set Primary button
+                // ── Right: buttons ──
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui: &mut egui::Ui| {
                     if !is_primary {
-                        let name = monitor.name.clone();
                         if ui
                             .add(
-                                egui::Button::new(
-                                    RichText::new("Set Primary").color(Color32::WHITE),
-                                )
-                                .fill(Color32::from_rgb(40, 90, 170))
-                                .rounding(Rounding::same(6.0)),
+                                egui::Button::new(RichText::new("Set Primary").color(Color32::WHITE))
+                                    .fill(Color32::from_rgb(40, 90, 170))
+                                    .rounding(Rounding::same(6.0)),
                             )
                             .clicked()
                         {
-                            on_set_primary(&name);
+                            action = CardAction::SetPrimary;
+                        }
+                        ui.add_space(6.0);
+                    }
+
+                    if !is_identifying {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("Identify").color(Color32::WHITE))
+                                    .fill(Color32::from_rgb(80, 60, 10))
+                                    .rounding(Rounding::same(6.0)),
+                            )
+                            .clicked()
+                        {
+                            action = CardAction::Identify;
                         }
                     }
                 });
             });
         });
+
+    action
 }
 
-fn format_identify_label(monitor: &Monitor) -> String {
-    let (lw, lh) = monitor.logical_resolution();
-    format!(
-        "{}\n{}×{}  {:.0} Hz",
-        monitor.name, lw, lh, monitor.refresh_rate
-    )
+fn badge(ui: &mut egui::Ui, label: &str, color: Color32) {
+    egui::Frame::none()
+        .fill(color)
+        .rounding(Rounding::same(4.0))
+        .inner_margin(Margin::symmetric(6.0, 2.0))
+        .show(ui, |ui: &mut egui::Ui| {
+            ui.label(
+                RichText::new(label)
+                    .font(FontId::proportional(11.0))
+                    .color(Color32::WHITE)
+                    .strong(),
+            );
+        });
 }

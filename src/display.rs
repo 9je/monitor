@@ -28,11 +28,10 @@ pub struct Monitor {
     pub rotation: Rotation,
     pub refresh_rate: f32,
     pub physical_mm: Option<(u32, u32)>,
-    pub available_modes: Vec<(u32, u32, Vec<f32>)>, // (w, h, refresh_rates)
 }
 
 impl Monitor {
-    /// Physical size in inches (diagonal)
+    /// Physical diagonal size in inches.
     pub fn size_inches(&self) -> Option<f32> {
         self.physical_mm.map(|(w, h)| {
             let w_in = w as f32 / 25.4;
@@ -41,7 +40,7 @@ impl Monitor {
         })
     }
 
-    /// Resolution accounting for rotation
+    /// Resolution accounting for rotation (portrait vs landscape).
     pub fn logical_resolution(&self) -> (u32, u32) {
         match self.rotation {
             Rotation::Left | Rotation::Right => (self.resolution.1, self.resolution.0),
@@ -50,9 +49,25 @@ impl Monitor {
     }
 }
 
-/// Parse `xrandr --query` output into a list of connected monitors.
+/// Returns true if we're running inside a Flatpak sandbox.
+fn is_flatpak() -> bool {
+    std::path::Path::new("/.flatpak-info").exists()
+}
+
+/// Build an xrandr Command, transparently proxying via flatpak-spawn when sandboxed.
+fn xrandr() -> Command {
+    if is_flatpak() {
+        let mut cmd = Command::new("flatpak-spawn");
+        cmd.args(["--host", "xrandr"]);
+        cmd
+    } else {
+        Command::new("xrandr")
+    }
+}
+
+/// Parse `xrandr --query` output into connected monitors.
 pub fn get_monitors() -> Result<Vec<Monitor>, String> {
-    let output = Command::new("xrandr")
+    let output = xrandr()
         .arg("--query")
         .output()
         .map_err(|e| format!("Failed to run xrandr: {e}"))?;
@@ -61,13 +76,12 @@ pub fn get_monitors() -> Result<Vec<Monitor>, String> {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_xrandr(&text)
+    parse_xrandr(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Set the primary monitor by name.
+/// Set the primary monitor by output name.
 pub fn set_primary(name: &str) -> Result<(), String> {
-    let status = Command::new("xrandr")
+    let status = xrandr()
         .args(["--output", name, "--primary"])
         .status()
         .map_err(|e| format!("Failed to run xrandr: {e}"))?;
@@ -79,41 +93,55 @@ pub fn set_primary(name: &str) -> Result<(), String> {
     }
 }
 
+/// Identify one monitor by dimming all others to 20% brightness.
+/// Call `restore_brightness` after a delay to undo this.
+pub fn dim_others(target_name: &str, all: &[Monitor]) -> Result<(), String> {
+    for m in all {
+        let brightness = if m.name == target_name { "1.0" } else { "0.2" };
+        xrandr()
+            .args(["--output", &m.name, "--brightness", brightness])
+            .status()
+            .map_err(|e| format!("xrandr failed for {}: {e}", m.name))?;
+    }
+    Ok(())
+}
+
+/// Restore all monitors to full brightness.
+pub fn restore_brightness(monitors: &[Monitor]) -> Result<(), String> {
+    for m in monitors {
+        xrandr()
+            .args(["--output", &m.name, "--brightness", "1.0"])
+            .status()
+            .map_err(|e| format!("xrandr failed for {}: {e}", m.name))?;
+    }
+    Ok(())
+}
+
+// ── xrandr parsing ────────────────────────────────────────────────────────────
+
 fn parse_xrandr(text: &str) -> Result<Vec<Monitor>, String> {
     let mut monitors = Vec::new();
     let mut lines = text.lines().peekable();
 
     while let Some(line) = lines.next() {
-        // Match connected output lines, e.g.:
-        //   DisplayPort-0 connected primary 1080x1920+4480+1249 left 527mm x 296mm
-        //   DisplayPort-1 connected 2560x1440+1920+0 (normal ...) 620mm x 370mm
         if !line.contains(" connected ") {
             continue;
         }
 
         let parts: Vec<&str> = line.split_whitespace().collect();
         let name = parts[0].to_string();
-
         let is_primary = line.contains(" primary ");
-
-        // Find the geometry token: WxH+X+Y
         let (resolution, position, rotation) = parse_geometry_token(&parts);
-
-        // Physical size: look for "NNNmm x NNNmm"
         let physical_mm = parse_physical_mm(line);
 
-        // Now parse mode lines until next output line
         let mut best_refresh = 0.0f32;
-        let mut available_modes = Vec::new();
 
         while let Some(peek) = lines.peek() {
-            // Mode lines start with whitespace
             if !peek.starts_with(' ') && !peek.starts_with('\t') {
                 break;
             }
             let mode_line = lines.next().unwrap();
-            if let Some((w, h, rates)) = parse_mode_line(mode_line) {
-                // The active refresh rate is marked with *
+            if let Some(rates) = parse_mode_rates(mode_line) {
                 if mode_line.contains('*') {
                     for r in &rates {
                         if *r > best_refresh {
@@ -121,11 +149,9 @@ fn parse_xrandr(text: &str) -> Result<Vec<Monitor>, String> {
                         }
                     }
                 }
-                available_modes.push((w, h, rates));
             }
         }
 
-        // If we couldn't determine refresh from mode lines, leave 0.0
         monitors.push(Monitor {
             name,
             is_primary,
@@ -134,28 +160,24 @@ fn parse_xrandr(text: &str) -> Result<Vec<Monitor>, String> {
             rotation,
             refresh_rate: best_refresh,
             physical_mm,
-            available_modes,
         });
     }
 
     Ok(monitors)
 }
 
-/// Parse geometry from xrandr words, returning (resolution, position, rotation).
 fn parse_geometry_token(parts: &[&str]) -> ((u32, u32), (i32, i32), Rotation) {
     let mut resolution = (0, 0);
     let mut position = (0, 0);
     let mut rotation = Rotation::Normal;
 
     for part in parts {
-        // Geometry: WxH+X+Y or WxH+X-Y etc.
         if part.contains('x') && (part.contains('+') || part.contains('-')) {
             if let Some((res, pos)) = parse_geometry(part) {
                 resolution = res;
                 position = pos;
             }
         }
-        // Rotation keyword
         match *part {
             "left" => rotation = Rotation::Left,
             "right" => rotation = Rotation::Right,
@@ -168,21 +190,15 @@ fn parse_geometry_token(parts: &[&str]) -> ((u32, u32), (i32, i32), Rotation) {
     (resolution, position, rotation)
 }
 
-/// Parse "WxH+X+Y" into ((w,h),(x,y)).
 fn parse_geometry(s: &str) -> Option<((u32, u32), (i32, i32))> {
-    // Split on 'x' to get width, then find +/- for height/x/y
     let x_pos = s.find('x')?;
     let width: u32 = s[..x_pos].parse().ok()?;
 
-    // After 'x', find first + or -
     let rest = &s[x_pos + 1..];
-    // height ends at first + or -
     let sep = rest.find(|c| c == '+' || c == '-')?;
     let height: u32 = rest[..sep].parse().ok()?;
 
-    // X and Y with signs
     let coords = &rest[sep..];
-    // coords looks like +4480+1249 or +1920-0
     let parts: Vec<&str> = coords
         .split(|c| c == '+' || c == '-')
         .filter(|s| !s.is_empty())
@@ -199,50 +215,34 @@ fn parse_geometry(s: &str) -> Option<((u32, u32), (i32, i32))> {
     Some(((width, height), (x, y)))
 }
 
-/// Parse "NNNmm x NNNmm" from a line.
 fn parse_physical_mm(line: &str) -> Option<(u32, u32)> {
-    // Look for pattern like "527mm x 296mm"
     let mm_idx = line.find("mm x ")?;
-    // Walk back to find the number before "mm"
     let before = &line[..mm_idx];
-    let w_str = before.split_whitespace().last()?;
-    let w: u32 = w_str.parse().ok()?;
-
-    let after = &line[mm_idx + 5..]; // skip "mm x "
-    let h_str = after.split_whitespace().next()?;
-    let h_str = h_str.trim_end_matches("mm");
-    let h: u32 = h_str.parse().ok()?;
-
+    let w: u32 = before.split_whitespace().last()?.parse().ok()?;
+    let after = &line[mm_idx + 5..];
+    let h: u32 = after
+        .split_whitespace()
+        .next()?
+        .trim_end_matches("mm")
+        .parse()
+        .ok()?;
     Some((w, h))
 }
 
-/// Parse a mode line like "   1920x1080     60.00*+  50.00    59.94"
-fn parse_mode_line(line: &str) -> Option<(u32, u32, Vec<f32>)> {
+fn parse_mode_rates(line: &str) -> Option<Vec<f32>> {
     let line = line.trim();
-    if line.is_empty() {
+    if line.is_empty() || !line.contains('x') {
         return None;
     }
-
     let mut parts = line.split_whitespace();
-    let res_str = parts.next()?;
-
-    let x_pos = res_str.find('x')?;
-    let w: u32 = res_str[..x_pos].parse().ok()?;
-    let h: u32 = res_str[x_pos + 1..].parse().ok()?;
-
+    parts.next(); // skip WxH
     let rates: Vec<f32> = parts
         .filter_map(|r| {
-            // Strip trailing markers (* + )
             let cleaned: String = r.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
             cleaned.parse().ok()
         })
         .collect();
-
-    if rates.is_empty() {
-        return None;
-    }
-
-    Some((w, h, rates))
+    if rates.is_empty() { None } else { Some(rates) }
 }
 
 #[cfg(test)]

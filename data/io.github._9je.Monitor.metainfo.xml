@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github._9je.Monitor</id>
+  <name>Monitor</name>
+  <summary>Manage display monitors on Pop OS</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Monitor is a simple GUI app for Pop OS that makes managing multiple displays easy.
+      Set your primary (default) monitor with one click, and identify which physical screen
+      corresponds to which DisplayPort by dimming all other monitors.
+    </p>
+    <ul>
+      <li>Lists all connected monitors with resolution, refresh rate, and physical size</li>
+      <li>Set the primary monitor with one click</li>
+      <li>Identify any monitor by dimming all others</li>
+      <li>Cycle through all monitors to see which port is which</li>
+    </ul>
+  </description>
+  <url type="homepage">https://github.com/9je/monitor</url>
+  <url type="bugtracker">https://github.com/9je/monitor/issues</url>
+  <releases>
+    <release version="0.1.0" date="2026-04-17"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

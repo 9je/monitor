@@ -1,0 +1,37 @@
+app-id: io.github._9je.Monitor
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: monitor
+
+finish-args:
+  # X11 display + clipboard
+  - --socket=x11
+  - --share=ipc
+  # GPU rendering
+  - --device=dri
+  # Allow spawning host commands (needed for xrandr)
+  - --talk-name=org.freedesktop.Flatpak
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+
+modules:
+  - name: monitor
+    buildsystem: simple
+    build-commands:
+      # Build offline using vendored crates (run scripts/vendor-deps.sh first)
+      - cargo --offline build --release
+      - install -Dm755 target/release/monitor /app/bin/monitor
+      - install -Dm644 data/io.github._9je.Monitor.desktop
+          /app/share/applications/io.github._9je.Monitor.desktop
+      - install -Dm644 data/io.github._9je.Monitor.metainfo.xml
+          /app/share/metainfo/io.github._9je.Monitor.metainfo.xml
+    build-options:
+      env:
+        CARGO_HOME: /run/build/monitor/cargo
+    sources:
+      - type: dir
+        path: ..

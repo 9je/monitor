@@ -1,83 +1,117 @@
-# CLAUDE.md — monitour
+# CLAUDE.md — Monitor
 
 Guidelines for working in this codebase with Claude Code.
 
 ## Project overview
 
-**monitour** is a Rust/egui desktop app for Pop OS that lets you:
-- See all connected monitors with their port names, resolutions, refresh rates, and physical sizes
+**Monitor** is a Rust/egui desktop app for Pop OS that lets you:
+- See all connected monitors with port names, resolutions, refresh rates, and physical sizes
 - Set the primary (default) monitor with one click
-- Identify which physical screen corresponds to which port by opening a fullscreen overlay on each monitor
+- Identify which physical screen is which port by dimming all other monitors (xrandr brightness)
 
-The backend is `xrandr` (X11). Wayland support via `gnome-randr`/DBus is a planned future addition.
+Backend: `xrandr` (X11). Flatpak-aware: detects sandbox and proxies xrandr via `flatpak-spawn --host`.
 
 ## Architecture
 
 ```
 src/
-├── main.rs       Entry point. Sets up eframe NativeOptions and launches the app.
+├── main.rs       Entry point. Sets up eframe NativeOptions and launches App.
 ├── display.rs    Pure data layer. Parses xrandr output, runs xrandr commands.
-│                 No egui imports here — only std and process::Command.
-└── ui.rs         All egui rendering. Calls display.rs functions.
-                  App struct owns monitor state and refresh logic.
+│                 No egui imports. All xrandr calls go through xrandr() helper
+│                 which transparently uses flatpak-spawn when sandboxed.
+└── ui.rs         All egui rendering. App struct owns monitor state.
+                  Identify spawns background threads for timed brightness restore.
+
+data/
+├── io.github._9je.Monitor.desktop      App launcher entry
+└── io.github._9je.Monitor.metainfo.xml AppStream metadata for Flatpak/Flathub
+
+flatpak/
+└── io.github._9je.Monitor.yml          Flatpak manifest
+
+install.sh    Local install: builds release binary + installs .desktop file
 ```
 
-**Key rule:** `display.rs` must never import `egui` or `eframe`. `ui.rs` must never shell out directly — always go through `display.rs` functions.
+**Key rule:** `display.rs` never imports `egui`/`eframe`. `ui.rs` never calls `Command` directly — always go through `display.rs`.
 
 ## Build & run
 
 ```bash
 cargo build           # debug build
-cargo run             # run the app (requires a running X11 session)
-cargo test            # unit tests (no display required — tests parse xrandr text)
-cargo build --release # optimized binary in target/release/monitour
+cargo run             # run (requires X11 session)
+cargo test            # unit tests (no display needed)
+cargo build --release # optimized binary
 ```
 
-## Adding a new backend (Wayland/gnome-randr)
+## Install to app launcher (local, no Flatpak)
 
-1. Detect session type at startup: `std::env::var("WAYLAND_DISPLAY").is_ok()`
-2. Add a `Backend` trait to `display.rs` with `get_monitors()` and `set_primary()` methods
-3. Implement `XrandrBackend` and `GnomeRandrBackend` as separate structs
-4. `App::new()` selects the right backend and stores it as `Box<dyn Backend>`
-5. `ui.rs` stays unchanged — it only calls `display.rs` API
+```bash
+bash install.sh
+```
+
+Copies the release binary to `~/.local/bin/monitor` and creates a `.desktop` file so Monitor appears in the GNOME app launcher.
+
+## Flatpak build (local)
+
+```bash
+# Install tools
+sudo apt install flatpak-builder
+flatpak install flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08
+flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//23.08
+
+# Vendor cargo deps first (needed for offline Flatpak build)
+cargo vendor vendor
+mkdir -p .cargo
+cat > .cargo/config.toml << 'EOF'
+[source.crates-io]
+replace-with = "vendored-sources"
+[source.vendored-sources]
+directory = "vendor"
+EOF
+
+# Build and install locally
+flatpak-builder --install --user --force-clean build-flatpak flatpak/io.github._9je.Monitor.yml
+```
+
+## Identify feature
+
+The identify feature uses `xrandr --brightness` to dim all monitors except the target to 20%.
+After 3 seconds a background thread restores all to 100%. This approach is chosen over
+overlay windows because it works regardless of window manager behavior or monitor layout.
+
+## Adding Wayland support
+
+1. Detect session: `std::env::var("WAYLAND_DISPLAY").is_ok()`
+2. Add a `Backend` enum to `display.rs` with `Xrandr` and `GnomeRandr` variants
+3. For GNOME Wayland: use `gdbus call --session --dest org.gnome.Mutter.DisplayConfig ...`
+   or the `gnome-randr` CLI if available
+4. `App::new()` selects backend; `ui.rs` stays unchanged
 
 ## Testing
 
 - Unit tests for xrandr parsing live in `display.rs` under `#[cfg(test)]`
-- Tests use inline sample strings, no real display required
-- When adding new parse logic, add a corresponding test case with a real xrandr snippet
+- Tests use inline sample strings — no real display required
+- Add a test case when adding new xrandr parse logic
 - Run `cargo test` before committing
 
 ## Code style
 
-- Follow standard `rustfmt` formatting (`cargo fmt`)
-- Lint with `cargo clippy -- -D warnings` before committing
-- No `unwrap()` in `display.rs` — return `Result<_, String>` and propagate errors to `ui.rs`
-- `ui.rs` may `unwrap_or_default()` on display results and show errors in the status bar
+- `cargo fmt` before committing
+- `cargo clippy -- -D warnings` before committing
+- No `unwrap()` in `display.rs` — return `Result<_, String>`
+- `ui.rs` shows errors in the status bar via `self.status = Some((msg, true))`
 - Prefer descriptive error strings over panic
 
-## egui / eframe version
+## egui/eframe notes (v0.29)
 
-Currently pinned to **egui 0.29 / eframe 0.29**. When upgrading:
-- Check `Frame::none()` vs `Frame::new()` API (changed in 0.28 → 0.29)
-- `Margin::same()` and `Rounding::same()` take `f32`, not integer literals
-- Multi-viewport API (`show_viewport_deferred`) was introduced in 0.29
-
-## Release / distribution
-
-To install system-wide after a release build:
-```bash
-sudo cp target/release/monitour /usr/local/bin/
-```
-
-To add a desktop launcher, create `~/.local/share/applications/monitour.desktop`.
+- `Frame::none()` not `Frame::new()` — the `new()` method doesn't exist in 0.29
+- `Margin::same()`, `Rounding::same()` take `f32` — use `8.0` not `8`
+- Closure params in `.show()` sometimes need explicit `|ui: &mut egui::Ui|` annotation
 
 ## Common xrandr commands this app replaces
 
 ```bash
-# List monitors
-xrandr --query
-
-# Set primary
-xrandr --output DisplayPort-1 --primary
+xrandr --query                              # list monitors
+xrandr --output DisplayPort-1 --primary    # set primary
+xrandr --output DisplayPort-0 --brightness 0.2  # dim
 ```

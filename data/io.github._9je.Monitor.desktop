@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Monitor
+Comment=Manage display monitors — set primary and identify screens
+Exec=monitor
+Icon=video-display
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;
+Keywords=monitor;display;screen;primary;xrandr;identify;
+StartupWMClass=monitor

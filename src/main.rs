@@ -6,22 +6,21 @@ use eframe::egui;
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("monitour")
-            .with_inner_size([620.0, 480.0])
+            .with_title("Monitor")
+            .with_inner_size([640.0, 500.0])
             .with_min_inner_size([480.0, 300.0])
             .with_icon(load_icon()),
         ..Default::default()
     };
 
     eframe::run_native(
-        "monitour",
+        "Monitor",
         options,
         Box::new(|_cc| Ok(Box::new(ui::App::new()))),
     )
 }
 
 fn load_icon() -> egui::IconData {
-    // Simple 32x32 monitor icon drawn in RGBA
     let size = 32usize;
     let mut rgba = vec![0u8; size * size * 4];
     for y in 0..size {
@@ -43,9 +42,5 @@ fn load_icon() -> egui::IconData {
             }
         }
     }
-    egui::IconData {
-        rgba,
-        width: size as u32,
-        height: size as u32,
-    }
+    egui::IconData { rgba, width: size as u32, height: size as u32 }
 }

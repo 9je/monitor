@@ -1,10 +1,10 @@
 [package]
-name = "monitour"
+name = "monitor"
 version = "0.1.0"
 edition = "2024"
 description = "GUI monitor manager for Pop OS — set primary display and identify monitors"
 license = "MIT"
-repository = "https://github.com/9je/monitour"
+repository = "https://github.com/9je/monitor"
 
 [dependencies]
 eframe = { version = "0.29", features = ["default"] }
