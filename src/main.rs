@@ -1,9 +1,17 @@
 mod display;
+mod identify;
 mod ui;
 
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Subprocess mode: monitor --identify INDEX NAME X Y W H
+    if args.get(1).map(|s| s.as_str()) == Some("--identify") {
+        return identify::run(&args);
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Monitor")

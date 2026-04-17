@@ -93,28 +93,55 @@ pub fn set_primary(name: &str) -> Result<(), String> {
     }
 }
 
-/// Identify one monitor by dimming all others to 20% brightness.
-/// Call `restore_brightness` after a delay to undo this.
-pub fn dim_others(target_name: &str, all: &[Monitor]) -> Result<(), String> {
-    for m in all {
-        let brightness = if m.name == target_name { "1.0" } else { "0.2" };
-        xrandr()
-            .args(["--output", &m.name, "--brightness", brightness])
-            .status()
-            .map_err(|e| format!("xrandr failed for {}: {e}", m.name))?;
-    }
-    Ok(())
+/// Spawn a fullscreen identify overlay on each of the given monitors.
+/// Returns the child processes so the caller can kill them early if needed.
+pub fn spawn_identify_overlays(
+    monitors: &[Monitor],
+) -> Vec<std::process::Child> {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    monitors
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            let (x, y) = m.position;
+            let (w, h) = m.logical_resolution();
+            std::process::Command::new(&exe)
+                .args([
+                    "--identify",
+                    &i.to_string(),
+                    &m.name,
+                    &x.to_string(),
+                    &y.to_string(),
+                    &w.to_string(),
+                    &h.to_string(),
+                ])
+                .spawn()
+                .ok()
+        })
+        .collect()
 }
 
-/// Restore all monitors to full brightness.
-pub fn restore_brightness(monitors: &[Monitor]) -> Result<(), String> {
-    for m in monitors {
-        xrandr()
-            .args(["--output", &m.name, "--brightness", "1.0"])
-            .status()
-            .map_err(|e| format!("xrandr failed for {}: {e}", m.name))?;
-    }
-    Ok(())
+/// Spawn a single identify overlay for one monitor.
+pub fn spawn_identify_one(index: usize, monitor: &Monitor) -> Option<std::process::Child> {
+    let exe = std::env::current_exe().ok()?;
+    let (x, y) = monitor.position;
+    let (w, h) = monitor.logical_resolution();
+    std::process::Command::new(exe)
+        .args([
+            "--identify",
+            &index.to_string(),
+            &monitor.name,
+            &x.to_string(),
+            &y.to_string(),
+            &w.to_string(),
+            &h.to_string(),
+        ])
+        .spawn()
+        .ok()
 }
 
 // ── xrandr parsing ────────────────────────────────────────────────────────────
